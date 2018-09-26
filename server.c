@@ -69,6 +69,33 @@ static void writeEventHandler(aeEventLoop *loop, int fd, void *data, int mask)
     }
 }
 
+int send_package(client_t* client, package_t* package, int trusted) {
+    if(package == NULL) {
+        return -1;
+    }
+
+    buffer_t *wbuffer = client->write_buffer;
+    check_buffer_size(wbuffer, sizeof(package_head_t) + package->head.length);
+    package_encode(wbuffer, package);
+    int writen = anetWrite(client->fd, (char *)wbuffer->buff + wbuffer->read_idx, (int)get_readable_size(wbuffer));
+    if (writen > 0) {
+        wbuffer->read_idx += writen;
+    }
+    
+    if (get_readable_size(wbuffer) != 0) {
+        if (aeCreateFileEvent(client->loop, client->fd, AE_WRITABLE, writeEventHandler, client) == AE_ERR) {
+            printf("create socket writeable event error, close it.");
+            free_client(client);
+        }
+    }
+
+    if(trusted){
+        zfree(package);
+    }
+
+    return 0;
+}
+
 static void readEventHandler(aeEventLoop *loop, int fd, void *data, int mask)
 {
     client_t *client = (client_t *)data;
@@ -85,26 +112,15 @@ static void readEventHandler(aeEventLoop *loop, int fd, void *data, int mask)
         while (1) {
             int decode_ret = packet_decode(rbuffer, &req_package);
             if (decode_ret == 0) {
-                package_t *resp_package = NULL;
-                do_package(req_package, &resp_package);
-                if (resp_package) {
-                    buffer_t *wbuffer = client->write_buffer;
-                    check_buffer_size(wbuffer, sizeof(package_head_t) + resp_package->head.length);
-                    package_encode(wbuffer, resp_package);
-                    int writen = anetWrite(client->fd, (char *)wbuffer->buff + wbuffer->read_idx,
-                                           (int)get_readable_size(wbuffer));
-                    if (writen > 0) {
-                        wbuffer->read_idx += writen;
-                    }
-                    if (get_readable_size(wbuffer) != 0) {
-                        if (aeCreateFileEvent(client->loop, client->fd, AE_WRITABLE, writeEventHandler, client) == AE_ERR) {
-                            printf("create socket writeable event error, close it.");
-                            free_client(client);
-                        }
-                    }
+                
+                event_func_node_t* func_node = find_event_func_node(client->handler_table, (int)req_package->head.type);
+                if(func_node) {                    
+                    ((handle_ptr_t)func_node->func)(func_node->data, client, req_package);       
+                } else{
+                    printf("unknown package! type = %d\n", req_package->head.type);
                 }
                 zfree(req_package);
-                zfree(resp_package);
+				
             } else if (decode_ret == -1) {
                 // not enough data
                 break;
@@ -128,7 +144,6 @@ static void acceptTcpHandler(aeEventLoop *loop, int fd, void *data, int mask)
     int cport;
 
     server_t *server = (server_t *)data;
-    // 调用accept接受连接
     int cfd = anetTcpAccept(NULL, fd, cip, sizeof(cip), &cport);
     if (cfd != -1) {
         printf("accepted ip %s:%d\n", cip, cport);
@@ -143,7 +158,7 @@ static void acceptTcpHandler(aeEventLoop *loop, int fd, void *data, int mask)
 
         client->loop = loop;
         client->fd = cfd;
-
+        client->handler_table = server->handler_table;
         if (aeCreateFileEvent(loop, cfd, AE_READABLE, readEventHandler, client) == AE_ERR) {
             // //继续调用aeCreateFileEvent给新连接的fd注册可读事件，并且注册读函数readEventHandler
             if (errno == ERANGE) {
@@ -163,7 +178,7 @@ void init_server(server_t *server) {
     server->loop = aeCreateEventLoop(server->max_client_count);
 
     // 创建listen_fd 实际上调用socket函数 
-    server->listen_fd = anetTcpServer(server->err_info, server->port, NULL, server->backlog);
+    server->listen_fd = anetTcpServer(server->err_info, server->port, server->host, server->backlog);
     if (server->listen_fd != ANET_ERR) {
         // 设置非阻塞
         anetNonBlock(server->err_info, server->listen_fd);
@@ -184,10 +199,14 @@ void wait_server(server_t *server)
 
     // 退出循环后，删除loop
     aeDeleteEventLoop(server->loop);
+
+    server->handler_table = NULL;
 }
 
-int main()
+int ae_server_run(event_func_table_t *handler_table)
 {
+    if(!handler_table) return -1;
+
     // 忽略SIGPIPE信号，防止给一个已经关闭socket的客户端连续两次发送数据导致SIGPIPE信号产生
     signal(SIGPIPE, SIG_IGN);
 
@@ -201,9 +220,15 @@ int main()
     //设置最大的客户端连接数
     server.max_client_count = DEFAULT_MAX_CLIENT_COUNT;
 
-    //设置默认的监听端口
+    //设置监听端口
     server.port = DEFAULT_LISTEN_PORT;
 
+    //设置监听IP
+    strncpy(server.host, "0.0.0.0", sizeof(server.host));
+
+    //创建映射需要指定两个函数，hashCode函数和equal函数。
+    server.handler_table = handler_table;
+    
     //初始化
     init_server(&server);
 

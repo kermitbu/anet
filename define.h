@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define zmalloc malloc
-#define zfree(p) if (p) { free(p); }
+#define zfree(p) if (p) { free(p); p = NULL; }
 #define zrealloc realloc
 
 #define DEFAULT_BUFF_SIZE        1024

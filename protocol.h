@@ -12,6 +12,10 @@
 #define QUERY_NAME      1
 #define CHAT_MESSAGE    2
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     uint32_t magic;
     uint32_t type;
@@ -31,4 +35,7 @@ int package_encode(buffer_t *buffer, package_t *package);
 
 void do_package(package_t *req_package, package_t **resp_package);
 
+#ifdef __cplusplus
+}
+#endif
 #endif //ANET_PROTOCOL_H
